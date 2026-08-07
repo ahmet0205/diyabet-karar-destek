@@ -1,0 +1,14 @@
+# Hassas Bilgiler (API Key)
+.env
+
+# Python Geçici Dosyaları
+__pycache__/
+*.pyc
+
+# Sanal Ortam Dosyaları
+venv/
+.venv/
+env/
+
+# Yerel Veri Tabanı
+diyabet_takip.db
