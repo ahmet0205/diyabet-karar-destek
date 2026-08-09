@@ -30,11 +30,24 @@ st.set_page_config(
 
 load_dotenv()
 
-# SAKLI KURAL 1: ÇİFT API KEY KONTROLÜ
-API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+API_KEY = None
+
+# 1. Öncelik: Streamlit Cloud Secrets (Yerelde hata vermemesi için try-except kullanıyoruz)
+try:
+    if "GEMINI_API_KEY" in st.secrets:
+        API_KEY = st.secrets["GEMINI_API_KEY"]
+    elif "GOOGLE_API_KEY" in st.secrets:
+        API_KEY = st.secrets["GOOGLE_API_KEY"]
+except Exception:
+    # Yerelde secrets.toml dosyası yoksa Streamlit hata fırlatır, burada yakalayıp pas geçiyoruz
+    pass
+
+# 2. Öncelik: Bulunamazsa yerel .env veya Sistem Ortam Değişkeni
+if not API_KEY:
+    API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 if not API_KEY:
-    st.error("⚠️ API Key bulunamadı! Lütfen .env dosyanızı kontrol edin.")
+    st.error("⚠️ API Key bulunamadı! Lütfen Streamlit Secrets veya .env dosyanızı kontrol edin.")
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
@@ -49,7 +62,6 @@ if 'analiz_yapildi' not in st.session_state:
 # YARDIMCI YAPAY ZEKA METİN SORGULAMA FONKSİYONU
 # ---------------------------------------------------------
 def fetch_text_macronutrients(yemek_adi):
-    # SAKLI KURAL 2: DİNAMİK MODEL TARAMA & FALLBACK
     try:
         acik_modeller = [m.name for m in client.models.list() if "flash" in m.name or "gemini" in m.name]
     except Exception:
@@ -79,7 +91,6 @@ def fetch_text_macronutrients(yemek_adi):
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            # SAKLI KURAL 3: REGEX İLE ESNEK JSON AYIKLAMA
             if response and response.text:
                 json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
                 if json_match:
@@ -406,6 +417,8 @@ st.sidebar.caption(f"Rol: **{user['rol'].capitalize()}** | @{user['kullanici_adi
 if st.sidebar.button("🚪 Çıkış Yap"):
     st.session_state['user'] = None
     st.session_state['analiz_yapildi'] = False
+    if 'aktif_resim_bytes' in st.session_state:
+        del st.session_state['aktif_resim_bytes']
     st.rerun()
 
 # ---------------------------------------------------------
@@ -441,21 +454,30 @@ if user['rol'] == 'hasta':
 
         ik_orani = st.sidebar.number_input("İnsülin / Karbonhidrat Oranı (1 U / X g KH):", min_value=1, max_value=50, value=15) if diyabet_tipi == "Tip 1 Diyabet" else 15
 
-        # ÖĞÜN GİRİŞ YÖNTEMİ SEÇİMİ
+        # ÖĞÜN GİRİŞ YÖNTEMİ SEÇİMİ (KAMERA DESTEKLİ)
         girdi_modu = st.radio(
             "📌 Öğün Ekleme Yöntemini Seçin:",
-            ["📸 Fotoğraf Yükleyerek Yapay Zeka Analizi", "✍️ Manuel Yemek / Makro Değeri Girişi"],
+            ["📸 Canlı Kamera İle Fotoğraf Çek", "🖼️ Galeriden Fotoğraf Yükle", "✍️ Manuel Yemek / Makro Değeri Girişi"],
             horizontal=True
         )
 
         st.write("---")
 
-        # MOD 1: FOTOĞRAFLI ANALİZ
-        if girdi_modu == "📸 Fotoğraf Yükleyerek Yapay Zeka Analizi":
-            yuklenen_dosya = st.file_uploader("Bir yemek fotoğrafı yükleyin...", type=["jpg", "jpeg", "png", "webp"])
+        # FOTOĞRAFLI ANALİZ İÇİN YÜKLEME VE KAMERA MANTIĞI
+        dosya_girdisi = None
 
-            if yuklenen_dosya is not None:
-                resim = Image.open(yuklenen_dosya)
+        if girdi_modu == "📸 Canlı Kamera İle Fotoğraf Çek":
+            dosya_girdisi = st.camera_input("Tabağın fotoğrafını çekin ve 'Resmi Kullan' (✔️) butonuna basın")
+        elif girdi_modu == "🖼️ Galeriden Fotoğraf Yükle":
+            dosya_girdisi = st.file_uploader("Bir yemek fotoğrafı yükleyin...", type=["jpg", "jpeg", "png", "webp"])
+
+        if dosya_girdisi is not None:
+            st.session_state['aktif_resim_bytes'] = dosya_girdisi.getvalue()
+
+        # MOD 1: KAMERA VEYA GALERİ İLE GÖRSEL ANALİZİ
+        if girdi_modu in ["📸 Canlı Kamera İle Fotoğraf Çek", "🖼️ Galeriden Fotoğraf Yükle"]:
+            if 'aktif_resim_bytes' in st.session_state:
+                resim = Image.open(io.BytesIO(st.session_state['aktif_resim_bytes']))
                 if resim.mode in ("RGBA", "P"):
                     resim = resim.convert("RGB")
                 resim.thumbnail((1024, 1024))
@@ -463,7 +485,11 @@ if user['rol'] == 'hasta':
                 col1, col2 = st.columns([1, 1])
                 
                 with col1:
-                    st.image(resim, caption="Yüklenen Tabağın Görseli", use_container_width=True)
+                    st.image(resim, caption="Yüklenen / Çekilen Tabağın Görseli", use_container_width=True)
+                    if st.button("🗑️ Görseli Sil / Yeniden Çek"):
+                        del st.session_state['aktif_resim_bytes']
+                        st.session_state['analiz_yapildi'] = False
+                        st.rerun()
                     
                 with col2:
                     st.subheader("🔍 Yapay Zeka Analizi")
@@ -532,7 +558,6 @@ if user['rol'] == 'hasta':
             
             c_m1, c_m2 = st.columns([2, 1])
             manuel_input_adi = c_m1.text_input("Yemek Adı Girin:", placeholder="Örn: Haşlanmış Yumurta, Tavuk Sote")
-            # BENZERSİZ KEY EKLENDİ (KEY: m_gram_input)
             manuel_gramaj = c_m2.number_input("Porsiyon Gramajı (g):", min_value=10, max_value=2000, value=150, key="m_gram_input")
 
             if st.button("🔍 Yemeğin Değerlerini Yapay Zekadan Getir", type="primary"):
@@ -552,7 +577,7 @@ if user['rol'] == 'hasta':
                 else:
                     st.warning("Lütfen bir yemek adı girin.")
 
-        # ESNEK DÜZELTME & ELLE MAKRO DEĞİŞTİRME PANALİ
+        # ESNEK DÜZELTME & ELLE MAKRO DEĞİŞTİRME PANALI
         if st.session_state.get('analiz_yapildi', False):
             st.write("---")
             st.subheader("🎯 Görsel Tanılama / Besin Verisi Düzeltme ve Onay")
@@ -560,7 +585,6 @@ if user['rol'] == 'hasta':
             
             c_1, c_2, c_3 = st.columns([2, 1, 1])
             nihai_yemek_adi = c_1.text_input("Yemek Adı:", value=st.session_state['tespit_edilen'])
-            # BENZERSİZ KEY EKLENDİ (KEY: onay_gramaj_input)
             porsiyon = c_2.number_input("Porsiyon Gramajı (g):", min_value=10, max_value=2000, value=st.session_state['porsiyon'], key="onay_gramaj_input")
             
             if c_3.button("🔄 İsme Göre Yapay Zekadan Yeniden Hesapla", use_container_width=True):
@@ -578,7 +602,6 @@ if user['rol'] == 'hasta':
             st.write("##### ✏️ 100 Gram Başına Düşen Makro Değerleri (Birebir Elle Değiştirebilirsiniz):")
             k_col1, k_col2, k_col3, k_col4, k_col5 = st.columns(5)
             
-            # KULLANICININ BİREBİR ELLE DEĞİŞTİREBİLECEĞİ KUTUCUKLAR (KEY'LERİ BENZERSİZLEŞTİRİLDİ)
             kh_100g_user = k_col1.number_input("100g Karbonhidrat (g):", value=st.session_state.get('kh_100g', 0.0), step=1.0, key="edit_kh")
             prot_100g_user = k_col2.number_input("100g Protein (g):", value=st.session_state.get('protein_100g', 0.0), step=1.0, key="edit_prot")
             yag_100g_user = k_col3.number_input("100g Yağ (g):", value=st.session_state.get('yag_100g', 0.0), step=1.0, key="edit_yag")
