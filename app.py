@@ -32,7 +32,7 @@ load_dotenv()
 
 API_KEY = None
 
-# 1. Öncelik: Streamlit Cloud Secrets (Yerelde hata vermemesi için try-except kullanıyoruz)
+# 1. Öncelik: Streamlit Cloud Secrets (Yerelde hata vermemesi için try-except)
 try:
     if "GEMINI_API_KEY" in st.secrets:
         API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -56,27 +56,28 @@ if 'user' not in st.session_state:
     st.session_state['user'] = None
 if 'analiz_yapildi' not in st.session_state:
     st.session_state['analiz_yapildi'] = False
-if 'aktif_resim' not in st.session_state:
-    st.session_state['aktif_resim'] = None
 
 # ---------------------------------------------------------
-# GÖRSEL OPTİMİZASYON VE AÇI DÜZELTME FONKSİYONU
+# FOTOĞRAF OPTİMİZASYONU (AÇI VE KALİTE DÜZELTME)
 # ---------------------------------------------------------
-def optimize_image(image_bytes, max_size=800, quality=75):
-    """Mobil kameralardan gelen yüksek boyutlu fotoğrafları sıkıştırır ve açı (EXIF) hatasını düzeltir."""
+def optimize_food_image(image_bytes, max_size=1280, quality=82):
+    """
+    Telefon fotoğraflarındaki EXIF yönünü düzeltir, 1280px sınırlayıp 
+    %82 kalite ile JPEG olarak sıkıştırılmış PIL Image döndürür.
+    """
     try:
-        img = Image.open(image_bytes)
-        img = ImageOps.exif_transpose(img)  # Telefon çekimlerindeki dönme/açı hatasını düzeltir
+        with Image.open(io.BytesIO(image_bytes)) as original:
+            image = ImageOps.exif_transpose(original)
 
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
+            if image.mode != "RGB":
+                image = image.convert("RGB")
 
-        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+            image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
 
-        buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=quality, optimize=True)
-        buffer.seek(0)
-        return Image.open(buffer)
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=quality, optimize=True)
+            output.seek(0)
+            return Image.open(output).copy()
     except Exception as e:
         st.error(f"Görsel işlenirken hata oluştu: {e}")
         return None
@@ -440,7 +441,8 @@ st.sidebar.caption(f"Rol: **{user['rol'].capitalize()}** | @{user['kullanici_adi
 if st.sidebar.button("🚪 Çıkış Yap"):
     st.session_state['user'] = None
     st.session_state['analiz_yapildi'] = False
-    st.session_state['aktif_resim'] = None
+    if 'aktif_resim_pil' in st.session_state:
+        del st.session_state['aktif_resim_pil']
     st.rerun()
 
 # ---------------------------------------------------------
@@ -488,25 +490,25 @@ if user['rol'] == 'hasta':
         dosya_girdisi = None
 
         if girdi_modu == "📸 Canlı Kamera İle Fotoğraf Çek":
-            dosya_girdisi = st.camera_input("Tabağın fotoğrafını çekin ve 'Resmi Kullan' (✔️) butonuna basın", key="camera_widget")
+            dosya_girdisi = st.camera_input("Tabağın fotoğrafını çekin ve 'Resmi Kullan' (✔️) butonuna basın", key="cam_widget")
         elif girdi_modu == "🖼️ Galeriden Fotoğraf Yükle":
-            dosya_girdisi = st.file_uploader("Bir yemek fotoğrafı yükleyin...", type=["jpg", "jpeg", "png", "webp"], key="gallery_widget")
+            dosya_girdisi = st.file_uploader("Bir yemek fotoğrafı yükleyin...", type=["jpg", "jpeg", "png", "webp"], key="gal_widget")
 
-        # Yeni dosya gelmişse optimize edip hafızaya alıyoruz
+        # Görsel geldiği an sıfırdan optimize edilip tek hamlede hazza alınır
         if dosya_girdisi is not None:
-            st.session_state['aktif_resim'] = optimize_image(dosya_girdisi)
+            st.session_state['aktif_resim_pil'] = optimize_food_image(dosya_girdisi.getvalue())
 
         # MOD 1: KAMERA VEYA GALERİ İLE GÖRSEL ANALİZİ
         if girdi_modu in ["📸 Canlı Kamera İle Fotoğraf Çek", "🖼️ Galeriden Fotoğraf Yükle"]:
-            if st.session_state.get('aktif_resim') is not None:
-                resim = st.session_state['aktif_resim']
+            if 'aktif_resim_pil' in st.session_state and st.session_state['aktif_resim_pil'] is not None:
+                resim = st.session_state['aktif_resim_pil']
 
                 col1, col2 = st.columns([1, 1])
                 
                 with col1:
                     st.image(resim, caption="Yüklenen / Çekilen Tabağın Görseli", use_container_width=True)
                     if st.button("🗑️ Görseli Sil / Yeniden Çek"):
-                        st.session_state['aktif_resim'] = None
+                        del st.session_state['aktif_resim_pil']
                         st.session_state['analiz_yapildi'] = False
                         st.rerun()
                     
@@ -658,8 +660,9 @@ if user['rol'] == 'hasta':
                 ogun_kaydet(user['id'], nihai_yemek_adi, porsiyon, toplam_kh, toplam_protein, toplam_yag, toplam_kalori, gi_user, hesaplanan_insulin, diyabet_tipi)
                 glikoz_kaydet(user['id'], kan_sekeri, trend_yoni, olcum_yontemi)
                 
-                # Başarılı kayıt sonrası hafızayı temizleme
-                st.session_state['aktif_resim'] = None
+                # Temizlik
+                if 'aktif_resim_pil' in st.session_state:
+                    del st.session_state['aktif_resim_pil']
                 st.session_state['analiz_yapildi'] = False
                 
                 st.success(f"✅ '{nihai_yemek_adi}' öğünü başarıyla kaydedildi!")
