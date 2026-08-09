@@ -8,7 +8,7 @@ import hashlib
 from datetime import datetime
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -39,7 +39,6 @@ try:
     elif "GOOGLE_API_KEY" in st.secrets:
         API_KEY = st.secrets["GOOGLE_API_KEY"]
 except Exception:
-    # Yerelde secrets.toml dosyası yoksa Streamlit hata fırlatır, burada yakalayıp pas geçiyoruz
     pass
 
 # 2. Öncelik: Bulunamazsa yerel .env veya Sistem Ortam Değişkeni
@@ -57,6 +56,30 @@ if 'user' not in st.session_state:
     st.session_state['user'] = None
 if 'analiz_yapildi' not in st.session_state:
     st.session_state['analiz_yapildi'] = False
+if 'aktif_resim' not in st.session_state:
+    st.session_state['aktif_resim'] = None
+
+# ---------------------------------------------------------
+# GÖRSEL OPTİMİZASYON VE AÇI DÜZELTME FONKSİYONU
+# ---------------------------------------------------------
+def optimize_image(image_bytes, max_size=800, quality=75):
+    """Mobil kameralardan gelen yüksek boyutlu fotoğrafları sıkıştırır ve açı (EXIF) hatasını düzeltir."""
+    try:
+        img = Image.open(image_bytes)
+        img = ImageOps.exif_transpose(img)  # Telefon çekimlerindeki dönme/açı hatasını düzeltir
+
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=quality, optimize=True)
+        buffer.seek(0)
+        return Image.open(buffer)
+    except Exception as e:
+        st.error(f"Görsel işlenirken hata oluştu: {e}")
+        return None
 
 # ---------------------------------------------------------
 # YARDIMCI YAPAY ZEKA METİN SORGULAMA FONKSİYONU
@@ -417,8 +440,7 @@ st.sidebar.caption(f"Rol: **{user['rol'].capitalize()}** | @{user['kullanici_adi
 if st.sidebar.button("🚪 Çıkış Yap"):
     st.session_state['user'] = None
     st.session_state['analiz_yapildi'] = False
-    if 'aktif_resim_bytes' in st.session_state:
-        del st.session_state['aktif_resim_bytes']
+    st.session_state['aktif_resim'] = None
     st.rerun()
 
 # ---------------------------------------------------------
@@ -463,31 +485,28 @@ if user['rol'] == 'hasta':
 
         st.write("---")
 
-        # FOTOĞRAFLI ANALİZ İÇİN YÜKLEME VE KAMERA MANTIĞI
         dosya_girdisi = None
 
         if girdi_modu == "📸 Canlı Kamera İle Fotoğraf Çek":
-            dosya_girdisi = st.camera_input("Tabağın fotoğrafını çekin ve 'Resmi Kullan' (✔️) butonuna basın")
+            dosya_girdisi = st.camera_input("Tabağın fotoğrafını çekin ve 'Resmi Kullan' (✔️) butonuna basın", key="camera_widget")
         elif girdi_modu == "🖼️ Galeriden Fotoğraf Yükle":
-            dosya_girdisi = st.file_uploader("Bir yemek fotoğrafı yükleyin...", type=["jpg", "jpeg", "png", "webp"])
+            dosya_girdisi = st.file_uploader("Bir yemek fotoğrafı yükleyin...", type=["jpg", "jpeg", "png", "webp"], key="gallery_widget")
 
+        # Yeni dosya gelmişse optimize edip hafızaya alıyoruz
         if dosya_girdisi is not None:
-            st.session_state['aktif_resim_bytes'] = dosya_girdisi.getvalue()
+            st.session_state['aktif_resim'] = optimize_image(dosya_girdisi)
 
         # MOD 1: KAMERA VEYA GALERİ İLE GÖRSEL ANALİZİ
         if girdi_modu in ["📸 Canlı Kamera İle Fotoğraf Çek", "🖼️ Galeriden Fotoğraf Yükle"]:
-            if 'aktif_resim_bytes' in st.session_state:
-                resim = Image.open(io.BytesIO(st.session_state['aktif_resim_bytes']))
-                if resim.mode in ("RGBA", "P"):
-                    resim = resim.convert("RGB")
-                resim.thumbnail((1024, 1024))
+            if st.session_state.get('aktif_resim') is not None:
+                resim = st.session_state['aktif_resim']
 
                 col1, col2 = st.columns([1, 1])
                 
                 with col1:
                     st.image(resim, caption="Yüklenen / Çekilen Tabağın Görseli", use_container_width=True)
                     if st.button("🗑️ Görseli Sil / Yeniden Çek"):
-                        del st.session_state['aktif_resim_bytes']
+                        st.session_state['aktif_resim'] = None
                         st.session_state['analiz_yapildi'] = False
                         st.rerun()
                     
@@ -577,7 +596,7 @@ if user['rol'] == 'hasta':
                 else:
                     st.warning("Lütfen bir yemek adı girin.")
 
-        # ESNEK DÜZELTME & ELLE MAKRO DEĞİŞTİRME PANALI
+        # ESNEK DÜZELTME & ELLE MAKRO DEĞİŞTİRME PANELİ
         if st.session_state.get('analiz_yapildi', False):
             st.write("---")
             st.subheader("🎯 Görsel Tanılama / Besin Verisi Düzeltme ve Onay")
@@ -638,6 +657,11 @@ if user['rol'] == 'hasta':
             if st.button("💾 Öğün Kaydını Veri Tabanına Kaydet", type="primary"):
                 ogun_kaydet(user['id'], nihai_yemek_adi, porsiyon, toplam_kh, toplam_protein, toplam_yag, toplam_kalori, gi_user, hesaplanan_insulin, diyabet_tipi)
                 glikoz_kaydet(user['id'], kan_sekeri, trend_yoni, olcum_yontemi)
+                
+                # Başarılı kayıt sonrası hafızayı temizleme
+                st.session_state['aktif_resim'] = None
+                st.session_state['analiz_yapildi'] = False
+                
                 st.success(f"✅ '{nihai_yemek_adi}' öğünü başarıyla kaydedildi!")
                 st.rerun()
 
